@@ -5,7 +5,7 @@
 > **This repository adds the `analysis` plugin** on top of upstream
 > codegraph — per-symbol complexity with LLM-classified big-O, optimization
 > history, performance records, locked dependency versions, and a decision
-> workflow. See [ADDITIONS.md](ADDITIONS.md) for the delta vs upstream.
+> workflow. See [src/analysis/README.md](src/analysis/README.md).
 
 Already installed? Run `codegraph upgrade`
 
@@ -51,40 +51,6 @@ Follow [@getcodegraph](https://x.com/getcodegraph) on X for updates.
 <sub>Get <b>early beta access</b> to the hosted product · <a href="https://getcodegraph.com">getcodegraph.com</a></sub>
 
 </div>
-
-## Installing (with the analysis plugin)
-
-This repository ships codegraph **plus** the `analysis` plugin
-(LLM-classified big-O, per-symbol metrics, optimization history, perf
-records, locked dependency versions). Build it from source:
-
-```bash
-git clone https://github.com/LozinLilis/codegraph-analysis-enhance.git
-cd codegraph-analysis-enhance
-npm install --include=dev
-npm run build
-npm link                 # optional: global `codegraph` command
-```
-
-Requirements: Node ≥ 22.5 (node:sqlite). No native build step.
-
-Quick start on any project:
-
-```bash
-codegraph init <project-path>                       # index (no LLM)
-codegraph analysis refresh <project-path>           # metrics/deps/toolchains (zero LLM cost)
-codegraph analysis hot <project-path> --limit 10    # hotspot ranking
-codegraph analysis context <symbol> <project-path>  # decision view before optimizing
-
-# optional: LLM complexity classification (any OpenAI-compatible endpoint)
-export CODEGRAPH_LLM_BASE_URL=...
-export CODEGRAPH_LLM_API_KEY=...
-export CODEGRAPH_LLM_MODEL=...
-codegraph analysis analyze-hot <project-path> --limit 10
-```
-
-See [ADDITIONS.md](ADDITIONS.md) for the full plugin reference and
-[benchmark.md](benchmark.md) for measured costs.
 
 ## Contents
 
