@@ -2,10 +2,10 @@
 
 # CodeGraph
 
-> **This fork adds the `analysis` plugin** — per-symbol complexity with
-> LLM-classified big-O, optimization history, performance records, locked
-> dependency versions, and a decision workflow. See
-> [ADDITIONS.md](ADDITIONS.md) for the delta vs upstream.
+> **This repository adds the `analysis` plugin** on top of upstream
+> codegraph — per-symbol complexity with LLM-classified big-O, optimization
+> history, performance records, locked dependency versions, and a decision
+> workflow. See [ADDITIONS.md](ADDITIONS.md) for the delta vs upstream.
 
 Already installed? Run `codegraph upgrade`
 
@@ -52,9 +52,9 @@ Follow [@getcodegraph](https://x.com/getcodegraph) on X for updates.
 
 </div>
 
-## Installing this fork (with the analysis plugin)
+## Installing (with the analysis plugin)
 
-This fork ships the upstream codegraph **plus** the `analysis` plugin
+This repository ships codegraph **plus** the `analysis` plugin
 (LLM-classified big-O, per-symbol metrics, optimization history, perf
 records, locked dependency versions). Build it from source:
 
