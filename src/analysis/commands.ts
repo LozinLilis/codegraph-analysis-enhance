@@ -146,8 +146,8 @@ export function registerAnalysisCommands(program: Command): void {
       try {
         ensureAnalysisSchema(db);
         const rows = db.prepare(
-          `SELECT name, version, resolved_version, kind, framework, source_file FROM analysis_dependencies ORDER BY framework DESC, name`,
-        ).all() as { name: string; version: string; resolved_version: string; kind: string; framework: number; source_file: string }[];
+          `SELECT name, version, resolved_version, kind, framework, import_count, source_file FROM analysis_dependencies ORDER BY framework DESC, import_count DESC, name`,
+        ).all() as { name: string; version: string; resolved_version: string; kind: string; framework: number; import_count: number; source_file: string }[];
         if (rows.length === 0) {
           console.log('No dependencies extracted. Run `codegraph analysis refresh` first.');
           return;
@@ -155,7 +155,7 @@ export function registerAnalysisCommands(program: Command): void {
         for (const r of rows) {
           const fw = r.framework ? ' [framework]' : '';
           const locked = r.resolved_version ? ` (locked ${r.resolved_version})` : '';
-          console.log(`  ${r.name}${r.version ? ' ' + r.version : ''}${locked} (${r.kind}${fw}, ${r.source_file})`);
+          console.log(`  ${r.name}${r.version ? ' ' + r.version : ''}${locked} (${r.kind}${fw}, imported by ${r.import_count} files, ${r.source_file})`);
         }
       } finally {
         db.close();

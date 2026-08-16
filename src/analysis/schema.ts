@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS analysis_dependencies (
   version TEXT,                            -- declared version (manifest)
   resolved_version TEXT NOT NULL DEFAULT '', -- locked version (Cargo.lock etc.)
   kind TEXT NOT NULL DEFAULT 'runtime',       -- runtime / dev / build
-  framework INTEGER NOT NULL DEFAULT 0,       -- 1 = framework-level dep
+  framework INTEGER NOT NULL DEFAULT 0,       -- 1 = referenced broadly (data-driven)
+  import_count INTEGER NOT NULL DEFAULT 0,    -- files importing this dep
   source_file TEXT NOT NULL,
   extracted_at INTEGER NOT NULL
 );
@@ -134,5 +135,9 @@ export function ensureAnalysisSchema(db: SqliteDatabase): void {
   const depCols = db.prepare(`PRAGMA table_info(analysis_dependencies)`).all() as { name: string }[];
   if (!depCols.some((c) => c.name === 'resolved_version')) {
     db.exec(`ALTER TABLE analysis_dependencies ADD COLUMN resolved_version TEXT NOT NULL DEFAULT ''`);
+  }
+  const depCols2 = db.prepare(`PRAGMA table_info(analysis_dependencies)`).all() as { name: string }[];
+  if (!depCols2.some((c) => c.name === 'import_count')) {
+    db.exec(`ALTER TABLE analysis_dependencies ADD COLUMN import_count INTEGER NOT NULL DEFAULT 0`);
   }
 }

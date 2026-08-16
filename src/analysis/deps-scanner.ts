@@ -6,19 +6,76 @@
  *   - pyproject.toml    (Python)
  *   - package.json      (JavaScript/TypeScript)
  *
- * Framework-level dependencies get flagged (framework=1) using a small
- * curated table of well-known frameworks per ecosystem.
+ * Framework-level detection is data-driven: a dependency counts as a
+ * framework when it is imported by a broad share of the project's source
+ * files (threshold: max(3 files, 5% of scanned source files)). No curated
+ * name lists — the project's own code decides what matters.
  */
 
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import type { SqliteDatabase } from '../db/sqlite-adapter';
 
-const FRAMEWORKS: Record<string, string[]> = {
-  rust: ['tokio', 'serde', 'axum', 'actix-web', 'rocket', 'rayon', 'clap', 'anyhow', 'thiserror', 'tower', 'hyper', 'tonic', 'sqlx', 'diesel', 'tracing', 'pyo3', 'crossterm', 'ratatui', 'rusqlite', 'reqwest', 'chrono', 'tui-markdown', 'egui', 'eframe'],
-  python: ['fastapi', 'flask', 'django', 'pydantic', 'sqlalchemy', 'httpx', 'requests', 'numpy', 'pandas', 'torch', 'tensorflow', 'asyncpg', 'redis', 'celery', 'pytest', 'mypy', 'ruff', 'uvicorn'],
-  js: ['react', 'vue', 'express', 'next', 'nuxt', 'svelte', 'fastify', 'axios', 'lodash', 'typescript', 'vite', 'jest', 'vitest', 'webpack', 'esbuild'],
-};
+/** Count how many source files import each dependency, by language. */
+async function scanImportCounts(root: string): Promise<{ counts: Map<string, number>; files: number }> {
+  const counts = new Map<string, number>();
+  let files = 0;
+  const skipDirs = new Set(['node_modules', '.git', 'target', 'dist', 'build', '.venv', '__pycache__', 'tests', 'scripts']);
+  const rustRe = /^\s*use\s+([A-Za-z0-9_]+)::/;
+  const pyRe = /^\s*(?:from\s+([A-Za-z0-9_.]+)\s+import|import\s+([A-Za-z0-9_]+)(?:\s+as\s+\w+)?)/;
+  const jsRe = /(?:from\s+|require\(\s*)['"]([^'"./][^'"]*)['"]/;
+
+  async function walk(dir: string, depth: number): Promise<void> {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (skipDirs.has(e.name) || e.name.startsWith('.')) continue;
+      const abs = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        await walk(abs, depth + 1);
+      } else if (/\.(rs|py|ts|tsx|js|jsx)$/.test(e.name)) {
+        files++;
+        let src: string;
+        try {
+          src = await fs.readFile(abs, 'utf-8');
+        } catch {
+          continue;
+        }
+        const seen = new Set<string>();
+        for (const line of src.split(/\r?\n/)) {
+          let m: RegExpMatchArray | null;
+          if (e.name.endsWith('.rs')) {
+            m = line.match(rustRe);
+            const crate = m?.[1];
+            if (crate && !['crate', 'self', 'super'].includes(crate)) seen.add(crate);
+          } else if (e.name.endsWith('.py')) {
+            m = line.match(pyRe);
+            if (m) {
+              const name = (m[1] ?? m[2] ?? '').split('.')[0] ?? '';
+              if (name && !['.', '..'].includes(name)) seen.add(name);
+            }
+          } else {
+            m = line.match(jsRe);
+            const dep = m?.[1]?.split('/')[0] ?? '';
+            if (dep) seen.add(dep);
+          }
+        }
+        for (const dep of seen) counts.set(dep, (counts.get(dep) ?? 0) + 1);
+      }
+    }
+  }
+
+  // Walk the project root once (depth-limited); sub-crate manifests are
+  // already covered by the same walk, so counting per-manifest dir would
+  // double-count files.
+  await walk(root, 0);
+  return { counts, files };
+}
 
 /** Parse a TOML-ish dependencies section: `name = "ver"` or `name = { version = "..." }`. */
 function parseTomlSection(lines: string[]): { name: string; version: string }[] {
@@ -40,8 +97,8 @@ function parseTomlSection(lines: string[]): { name: string; version: string }[] 
   return out;
 }
 
-/** Extract dependencies from a manifest file by ecosystem. */
-async function scanManifest(root: string, relPath: string, ecosystem: string): Promise<{ name: string; version: string; kind: string }[]> {
+/** Extract dependencies from a manifest file. */
+async function scanManifest(root: string, relPath: string): Promise<{ name: string; version: string; kind: string }[]> {
   const abs = path.join(root, relPath);
   let content: string;
   try {
@@ -50,7 +107,6 @@ async function scanManifest(root: string, relPath: string, ecosystem: string): P
     return [];
   }
 
-  const frameworkSet = new Set(FRAMEWORKS[ecosystem] ?? []);
   const out: { name: string; version: string; kind: string }[] = [];
   const flag = (name: string, version: string, kind: string) => {
     out.push({ name, version, kind });
@@ -72,12 +128,8 @@ async function scanManifest(root: string, relPath: string, ecosystem: string): P
     } catch { /* invalid json — skip */ }
   }
 
-  for (const d of out) {
-    (d as { framework?: number }).framework = frameworkSet.has(d.name) ? 1 : 0;
-  }
   return out;
 }
-
 /** Recursively find manifest files (depth-limited, excludes node_modules/.git/target). */
 async function findManifests(root: string, maxDepth: number): Promise<string[]> {
   const out: string[] = [];
@@ -213,11 +265,11 @@ export async function refreshToolchains(db: SqliteDatabase, root: string): Promi
 /** Refresh analysis_dependencies from all supported manifests under root. */
 export async function refreshDependencies(db: SqliteDatabase, root: string): Promise<number> {
   const insert = db.prepare(`
-    INSERT INTO analysis_dependencies (name, version, resolved_version, kind, framework, source_file, extracted_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO analysis_dependencies (name, version, resolved_version, kind, framework, import_count, source_file, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(name) DO UPDATE SET
       version=excluded.version, resolved_version=excluded.resolved_version,
-      kind=excluded.kind, framework=excluded.framework,
+      kind=excluded.kind, framework=excluded.framework, import_count=excluded.import_count,
       source_file=excluded.source_file, extracted_at=excluded.extracted_at
   `);
 
@@ -227,17 +279,24 @@ export async function refreshDependencies(db: SqliteDatabase, root: string): Pro
   const seenSources = new Set<string>();
   const manifests = await findManifests(root, 3);
   for (const rel of manifests) {
-    let ecosystem: string;
-    if (rel.endsWith('Cargo.toml')) ecosystem = 'rust';
-    else if (rel.endsWith('pyproject.toml')) ecosystem = 'python';
-    else ecosystem = 'js';
-    const deps = await scanManifest(root, rel, ecosystem);
+    const deps = await scanManifest(root, rel);
     seenSources.add(rel);
     for (const d of deps) {
       const resolved = lockVersions.get(d.name) ?? '';
-      insert.run(d.name, d.version, resolved, d.kind, (d as { framework?: number }).framework ?? 0, rel, now);
+      insert.run(d.name, d.version, resolved, d.kind, 0, 0, rel, now);
       count++;
     }
+  }
+
+  // data-driven framework flags: broad import coverage => framework-level
+  const { counts: importCounts, files: scannedFiles } = await scanImportCounts(root);
+  const threshold = Math.max(3, Math.ceil(scannedFiles * 0.05));
+  const updateFlag = db.prepare(`
+    UPDATE analysis_dependencies SET framework = ?, import_count = ?
+    WHERE name = ?
+  `);
+  for (const [name, n] of importCounts) {
+    updateFlag.run(n >= threshold ? 1 : 0, n, name);
   }
 
   // drop deps whose manifest was not scanned this run (manifest deleted/moved)
