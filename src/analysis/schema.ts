@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS analysis_symbol_metrics (
   loc INTEGER NOT NULL DEFAULT 0,
   complexity INTEGER NOT NULL DEFAULT 0,      -- cyclomatic approx (numeric)
   complexity_label TEXT NOT NULL DEFAULT '',  -- big-O hint: O(1)/O(n)/O(n^2)...
+  label_source TEXT NOT NULL DEFAULT 'heuristic', -- heuristic | llm
   params INTEGER NOT NULL DEFAULT 0,
   call_count INTEGER NOT NULL DEFAULT 0,      -- incoming calls from core edges
   style TEXT NOT NULL DEFAULT '',             -- e.g. iterators / prealloc_string / sync_mutex
@@ -116,5 +117,8 @@ export function ensureAnalysisSchema(db: SqliteDatabase): void {
   const cols = db.prepare(`PRAGMA table_info(analysis_symbol_metrics)`).all() as { name: string }[];
   if (!cols.some((c) => c.name === 'complexity_label')) {
     db.exec(`ALTER TABLE analysis_symbol_metrics ADD COLUMN complexity_label TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!cols.some((c) => c.name === 'label_source')) {
+    db.exec(`ALTER TABLE analysis_symbol_metrics ADD COLUMN label_source TEXT NOT NULL DEFAULT 'heuristic'`);
   }
 }

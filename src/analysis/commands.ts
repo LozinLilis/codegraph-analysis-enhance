@@ -19,10 +19,11 @@ import type { Command } from 'commander';
 import { DatabaseConnection, getDatabasePath } from '../db';
 import type { SqliteDatabase } from '../db/sqlite-adapter';
 import { ensureAnalysisSchema } from './schema';
-import { refreshMetrics } from './metrics-extractor';
+import { refreshMetrics, extractBody } from './metrics-extractor';
 import { refreshDependencies } from './deps-scanner';
 import { recordOptimization, getHistory } from './history';
 import { recordPerf, getPerf, getLatestPerf } from './perf-recorder';
+import { readLlmConfig, analyzeSymbol, analyzeTopSymbols } from './llm-analyzer';
 
 /** Walk up from cwd to find the nearest initialized codegraph project. */
 function resolveProjectRoot(pathArg?: string): string {
@@ -84,7 +85,7 @@ export function registerAnalysisCommands(program: Command): void {
       try {
         ensureAnalysisSchema(db);
         const rows = db.prepare(
-          `SELECT qualified_name, file_path, kind, loc, complexity, complexity_label, params, call_count, style
+          `SELECT qualified_name, file_path, kind, loc, complexity, complexity_label, label_source, params, call_count, style
            FROM analysis_symbol_metrics
            WHERE qualified_name = ? OR qualified_name LIKE ?`,
         ).all(symbol, `%${symbol}%`);
@@ -95,7 +96,7 @@ export function registerAnalysisCommands(program: Command): void {
         for (const r of rows) {
           const perf = getLatestPerf(db, r.qualified_name);
           console.log(`${r.qualified_name}  (${r.kind}, ${r.file_path})`);
-          console.log(`  loc=${r.loc}  complexity=${r.complexity}${r.complexity_label ? ' (' + r.complexity_label + ')' : ''}  params=${r.params}  calls=${r.call_count}`);
+          console.log(`  loc=${r.loc}  complexity=${r.complexity}${r.complexity_label ? ' (' + r.complexity_label + ')' : ''}${r.label_source === 'llm' ? ' [llm]' : ''}  params=${r.params}  calls=${r.call_count}`);
           if (r.style) console.log(`  style: ${r.style}`);
           if (perf) console.log(`  latest perf: ${perf.value}${perf.unit} (${perf.metric}${perf.scenario ? ', ' + perf.scenario : ''})`);
         }
@@ -117,7 +118,7 @@ export function registerAnalysisCommands(program: Command): void {
         ensureAnalysisSchema(db);
         const sortCol = opts.sort === 'calls' ? 'call_count' : opts.sort === 'loc' ? 'loc' : 'complexity';
         const rows = db.prepare(
-          `SELECT qualified_name, kind, file_path, loc, complexity, complexity_label, call_count, style
+          `SELECT qualified_name, kind, file_path, loc, complexity, complexity_label, label_source, call_count, style
            FROM analysis_symbol_metrics
            ORDER BY ${sortCol} DESC LIMIT ?`,
         ).all(Number(opts.limit) || 20);
@@ -127,7 +128,7 @@ export function registerAnalysisCommands(program: Command): void {
         }
         console.log(`Top ${rows.length} by ${opts.sort}:`);
         for (const r of rows) {
-          console.log(`  ${r.complexity.toString().padStart(4)} cplx ${(r.complexity_label || '').padEnd(12)} | ${r.call_count.toString().padStart(4)} calls | ${r.loc.toString().padStart(5)} loc | ${r.qualified_name} (${r.file_path})`);
+          console.log(`  ${r.complexity.toString().padStart(4)} cplx ${(r.complexity_label || '').padEnd(14)}${r.label_source === 'llm' ? '[llm]' : '     '} | ${r.call_count.toString().padStart(4)} calls | ${r.loc.toString().padStart(5)} loc | ${r.qualified_name} (${r.file_path})`);
         }
       } finally {
         db.close();
@@ -261,6 +262,96 @@ export function registerAnalysisCommands(program: Command): void {
       }
     });
 
+  // -- llm analyze ------------------------------------------------------------
+  analysis
+    .command('analyze <symbol> [path]')
+    .description('LLM-classify complexity for one symbol (needs CODEGRAPH_LLM_API_KEY)')
+    .action(async (symbol: string, pathArg?: string) => {
+      const cfg = readLlmConfig();
+      if (!cfg) {
+        console.error('CODEGRAPH_LLM_API_KEY not set. Configure CODEGRAPH_LLM_BASE_URL / CODEGRAPH_LLM_API_KEY / CODEGRAPH_LLM_MODEL.');
+        return;
+      }
+      const root = resolveProjectRoot(pathArg);
+      const { db } = openDb(root);
+      try {
+        ensureAnalysisSchema(db);
+        const row = db.prepare(
+          `SELECT qualified_name, file_path, language, start_line, end_line
+           FROM nodes WHERE qualified_name = ? OR qualified_name LIKE ?
+           LIMIT 1`,
+        ).get(symbol, `%${symbol}%`) as
+          { qualified_name: string; file_path: string; language: string; start_line: number; end_line: number } | undefined;
+        if (!row) {
+          console.log(`No node found for '${symbol}'.`);
+          return;
+        }
+        const body = await extractBody(root, row.file_path, row.start_line, row.end_line);
+        if (!body) {
+          console.log(`Source unreadable for '${row.qualified_name}' at ${row.file_path}. Run 'codegraph sync' first.`);
+          return;
+        }
+        console.log(`Analyzing ${row.qualified_name} (${row.language}) with ${cfg.model}...`);
+        const verdict = await analyzeSymbol(db, cfg, row.qualified_name, row.file_path, row.language, body);
+        console.log(`  complexity: ${verdict.complexity}`);
+        if (verdict.reason) console.log(`  reason: ${verdict.reason}`);
+      } finally {
+        db.close();
+      }
+    });
+
+  analysis
+    .command('analyze-hot [path]')
+    .option('-n, --limit <n>', 'number of symbols to analyze', '10')
+    .option('--order <key>', 'complexity | calls', 'complexity')
+    .description('LLM-classify the top-N heuristic-labeled symbols (cost-controlled)')
+    .action(async (pathArg: string | undefined, opts: { limit: string; order: string }) => {
+      const cfg = readLlmConfig();
+      if (!cfg) {
+        console.error('CODEGRAPH_LLM_API_KEY not set. Configure CODEGRAPH_LLM_BASE_URL / CODEGRAPH_LLM_API_KEY / CODEGRAPH_LLM_MODEL.');
+        return;
+      }
+      const root = resolveProjectRoot(pathArg);
+      const { db } = openDb(root);
+      try {
+        ensureAnalysisSchema(db);
+        const limit = Math.max(1, Math.min(Number(opts.limit) || 10, 200));
+        const order = opts.order === 'calls' ? 'calls' : 'complexity';
+
+        // preload bodies for candidate symbols
+        const candidates = db.prepare(
+          `SELECT qualified_name, file_path, language, start_line, end_line
+           FROM nodes
+           WHERE qualified_name IN (
+             SELECT qualified_name FROM analysis_symbol_metrics
+             WHERE label_source = 'heuristic'
+             ORDER BY ${order === 'calls' ? 'call_count' : 'complexity'} DESC LIMIT ?
+           )`,
+        ).all(limit) as
+          { qualified_name: string; file_path: string; language: string; start_line: number; end_line: number }[];
+
+        const bodies = new Map<string, { body: string; language: string; filePath: string }>();
+        for (const c of candidates) {
+          const body = await extractBody(root, c.file_path, c.start_line, c.end_line);
+          bodies.set(c.qualified_name, { body, language: c.language, filePath: c.file_path });
+        }
+
+        const result = await analyzeTopSymbols(db, cfg, limit, order, bodies);
+        if (result.skipped_no_llm) {
+          console.error('CODEGRAPH_LLM_API_KEY not set.');
+          return;
+        }
+        console.log(`Analyzed ${result.analyzed}/${limit} top-${order} symbols with ${cfg.model}`);
+        if (result.failed.length > 0) {
+          console.log('Failed:');
+          for (const f of result.failed.slice(0, 10)) console.log(`  - ${f}`);
+          if (result.failed.length > 10) console.log(`  ... and ${result.failed.length - 10} more`);
+        }
+      } finally {
+        db.close();
+      }
+    });
+
   // -- context ----------------------------------------------------------------
   analysis
     .command('context <symbol> [path]')
@@ -271,7 +362,7 @@ export function registerAnalysisCommands(program: Command): void {
       try {
         ensureAnalysisSchema(db);
         const syms = db.prepare(
-          `SELECT qualified_name, file_path, kind, loc, complexity, complexity_label, params, call_count, style
+          `SELECT qualified_name, file_path, kind, loc, complexity, complexity_label, label_source, params, call_count, style
            FROM analysis_symbol_metrics
            WHERE qualified_name = ? OR qualified_name LIKE ?`,
         ).all(symbol, `%${symbol}%`);
@@ -282,7 +373,7 @@ export function registerAnalysisCommands(program: Command): void {
         for (const s of syms) {
           console.log(`## ${s.qualified_name}`);
           console.log(`- kind: ${s.kind}  file: ${s.file_path}`);
-          console.log(`- loc: ${s.loc}  complexity(approx): ${s.complexity}${s.complexity_label ? ' (' + s.complexity_label + ')' : ''}  params: ${s.params}  incoming calls: ${s.call_count}`);
+          console.log(`- loc: ${s.loc}  complexity(approx): ${s.complexity}${s.complexity_label ? ' (' + s.complexity_label + ')' : ''}${s.label_source === 'llm' ? ' [llm]' : ' [heuristic]'}  params: ${s.params}  incoming calls: ${s.call_count}`);
           if (s.style) console.log(`- style: ${s.style}`);
           const perf = getPerf(db, s.qualified_name, 5);
           if (perf.length > 0) {

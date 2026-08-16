@@ -97,7 +97,7 @@ function detectBigO(body: string, qualifiedName: string): string {
 }
 
 /** Extract a symbol's body text from source lines (1-indexed, inclusive). */
-async function extractBody(
+export async function extractBody(
   root: string,
   filePath: string,
   startLine: number,

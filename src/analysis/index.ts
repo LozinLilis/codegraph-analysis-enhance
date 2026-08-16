@@ -12,3 +12,4 @@ export { refreshMetrics } from './metrics-extractor';
 export { refreshDependencies } from './deps-scanner';
 export { recordOptimization, getHistory, listRecentHistory } from './history';
 export { recordPerf, getPerf, getLatestPerf } from './perf-recorder';
+export { readLlmConfig, analyzeSymbol, analyzeTopSymbols } from './llm-analyzer';
