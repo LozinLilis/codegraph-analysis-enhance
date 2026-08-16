@@ -323,6 +323,7 @@ export function registerAnalysisCommands(program: Command): void {
         const verdict = await analyzeSymbol(db, cfg, row.qualified_name, row.file_path, row.language, body);
         console.log(`  complexity: ${verdict.complexity}`);
         if (verdict.reason) console.log(`  reason: ${verdict.reason}`);
+        console.log(`  tokens: input ${verdict.usage.promptTokens} | output ${verdict.usage.completionTokens} | total ${verdict.usage.totalTokens}`);
       } finally {
         db.close();
       }
@@ -370,6 +371,7 @@ export function registerAnalysisCommands(program: Command): void {
           return;
         }
         console.log(`Analyzed ${result.analyzed}/${limit} top-${order} symbols with ${cfg.model}`);
+        console.log(`  tokens: input ${result.promptTokens} | output ${result.completionTokens} | total ${result.totalTokens} (avg ${result.analyzed > 0 ? Math.round(result.totalTokens / result.analyzed) : 0}/symbol)`);
         if (result.failed.length > 0) {
           console.log('Failed:');
           for (const f of result.failed.slice(0, 10)) console.log(`  - ${f}`);

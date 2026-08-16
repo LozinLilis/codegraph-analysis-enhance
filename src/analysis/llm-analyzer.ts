@@ -38,6 +38,16 @@ export interface LlmVerdict {
   reason: string;
 }
 
+export interface LlmUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export interface LlmAnalysisResult extends LlmVerdict {
+  usage: LlmUsage;
+}
+
 const SYSTEM_PROMPT = `You are a precise algorithm-complexity analyst. Given a source function,
 classify its time complexity. Consider nested loops, recursion, sorting,
 hash lookups, binary search, and standard-library calls you can see.
@@ -54,13 +64,13 @@ function buildUserPrompt(language: string, qualifiedName: string, body: string):
   return `Language: ${language}\nFunction: ${qualifiedName}\n\nSource:\n\`\`\`\n${body.slice(0, 6000)}\n\`\`\`\n\nComplexity:`;
 }
 
-/** Call the LLM once and parse the verdict. Throws on transport/parse errors. */
+/** Call the LLM once and parse the verdict + usage. Throws on transport/parse errors. */
 export async function analyzeSymbolWithLlm(
   cfg: LlmConfig,
   language: string,
   qualifiedName: string,
   body: string,
-): Promise<LlmVerdict> {
+): Promise<LlmAnalysisResult> {
   const url = `${cfg.baseUrl.replace(/\/$/, '')}/chat/completions`;
   const resp = await fetch(url, {
     method: 'POST',
@@ -85,6 +95,7 @@ export async function analyzeSymbolWithLlm(
   }
   const data = (await resp.json()) as {
     choices?: { message?: { content?: string } }[];
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   };
   const content = data.choices?.[0]?.message?.content ?? '';
   const m = content.match(/\{[\s\S]*\}/);
@@ -92,7 +103,12 @@ export async function analyzeSymbolWithLlm(
   const parsed = JSON.parse(m[0]) as Partial<LlmVerdict>;
   const complexity = (parsed.complexity ?? '').trim();
   if (!complexity) throw new Error(`LLM returned no complexity field`);
-  return { complexity, reason: (parsed.reason ?? '').trim() };
+  const usage: LlmUsage = {
+    promptTokens: data.usage?.prompt_tokens ?? 0,
+    completionTokens: data.usage?.completion_tokens ?? 0,
+    totalTokens: data.usage?.total_tokens ?? 0,
+  };
+  return { complexity, reason: (parsed.reason ?? '').trim(), usage };
 }
 
 /** Analyze a single symbol already present in analysis_symbol_metrics. */
@@ -103,7 +119,7 @@ export async function analyzeSymbol(
   filePath: string,
   language: string,
   body: string,
-): Promise<LlmVerdict> {
+): Promise<LlmAnalysisResult> {
   const verdict = await analyzeSymbolWithLlm(cfg, language, qualifiedName, body);
   db.prepare(`
     UPDATE analysis_symbol_metrics
@@ -117,6 +133,9 @@ export interface AnalyzeBatchResult {
   analyzed: number;
   failed: string[];
   skipped_no_llm: boolean;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
 }
 
 /**
@@ -131,7 +150,7 @@ export async function analyzeTopSymbols(
   bodies: Map<string, { body: string; language: string; filePath: string }>,
 ): Promise<AnalyzeBatchResult> {
   if (!cfg) {
-    return { analyzed: 0, failed: [], skipped_no_llm: true };
+    return { analyzed: 0, failed: [], skipped_no_llm: true, promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   }
   const sortCol = order === 'calls' ? 'call_count' : 'complexity';
   const rows = db.prepare(`
@@ -142,6 +161,9 @@ export async function analyzeTopSymbols(
 
   const failed: string[] = [];
   let analyzed = 0;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let totalTokens = 0;
   for (const r of rows) {
     const src = bodies.get(r.qualified_name);
     if (!src || !src.body) {
@@ -156,9 +178,12 @@ export async function analyzeTopSymbols(
         WHERE qualified_name = ? AND file_path = ?
       `).run(verdict.complexity, r.qualified_name, r.file_path);
       analyzed++;
+      promptTokens += verdict.usage.promptTokens;
+      completionTokens += verdict.usage.completionTokens;
+      totalTokens += verdict.usage.totalTokens;
     } catch (err) {
       failed.push(`${r.qualified_name} (${err instanceof Error ? err.message : String(err)})`);
     }
   }
-  return { analyzed, failed, skipped_no_llm: false };
+  return { analyzed, failed, skipped_no_llm: false, promptTokens, completionTokens, totalTokens };
 }
