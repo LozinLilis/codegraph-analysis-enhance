@@ -15,7 +15,7 @@ import * as path from 'path';
 import type { SqliteDatabase } from '../db/sqlite-adapter';
 
 const FRAMEWORKS: Record<string, string[]> = {
-  rust: ['tokio', 'serde', 'axum', 'actix-web', 'rocket', 'rayon', 'clap', 'anyhow', 'thiserror', 'tower', 'hyper', 'tonic', 'sqlx', 'diesel', 'tracing', 'pyo3'],
+  rust: ['tokio', 'serde', 'axum', 'actix-web', 'rocket', 'rayon', 'clap', 'anyhow', 'thiserror', 'tower', 'hyper', 'tonic', 'sqlx', 'diesel', 'tracing', 'pyo3', 'crossterm', 'ratatui', 'rusqlite', 'reqwest', 'chrono', 'tui-markdown', 'egui', 'eframe'],
   python: ['fastapi', 'flask', 'django', 'pydantic', 'sqlalchemy', 'httpx', 'requests', 'numpy', 'pandas', 'torch', 'tensorflow', 'asyncpg', 'redis', 'celery', 'pytest', 'mypy', 'ruff', 'uvicorn'],
   js: ['react', 'vue', 'express', 'next', 'nuxt', 'svelte', 'fastify', 'axios', 'lodash', 'typescript', 'vite', 'jest', 'vitest', 'webpack', 'esbuild'],
 };
