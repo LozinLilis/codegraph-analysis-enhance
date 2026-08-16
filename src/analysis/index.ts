@@ -9,7 +9,7 @@
 export { registerAnalysisCommands } from './commands';
 export { ensureAnalysisSchema, ANALYSIS_DDL } from './schema';
 export { refreshMetrics } from './metrics-extractor';
-export { refreshDependencies } from './deps-scanner';
+export { refreshDependencies, refreshToolchains, scanToolchains } from './deps-scanner';
 export { recordOptimization, getHistory, listRecentHistory } from './history';
 export { recordPerf, getPerf, getLatestPerf } from './perf-recorder';
 export { readLlmConfig, analyzeSymbol, analyzeTopSymbols } from './llm-analyzer';

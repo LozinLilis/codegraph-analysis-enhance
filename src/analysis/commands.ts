@@ -20,7 +20,7 @@ import { DatabaseConnection, getDatabasePath } from '../db';
 import type { SqliteDatabase } from '../db/sqlite-adapter';
 import { ensureAnalysisSchema } from './schema';
 import { refreshMetrics, extractBody } from './metrics-extractor';
-import { refreshDependencies } from './deps-scanner';
+import { refreshDependencies, refreshToolchains } from './deps-scanner';
 import { recordOptimization, getHistory } from './history';
 import { recordPerf, getPerf, getLatestPerf } from './perf-recorder';
 import { readLlmConfig, analyzeSymbol, analyzeTopSymbols } from './llm-analyzer';
@@ -67,9 +67,10 @@ export function registerAnalysisCommands(program: Command): void {
         ensureAnalysisSchema(db);
         const m = await refreshMetrics(db, root);
         const deps = await refreshDependencies(db, root);
+        const tcs = await refreshToolchains(db, root);
         console.log(`analysis refresh done (${root})`);
         console.log(`  symbols: ${m.symbols}  files: ${m.files}  skipped(unreadable): ${m.skipped}`);
-        console.log(`  dependencies: ${deps}`);
+        console.log(`  dependencies: ${deps}  toolchains: ${tcs}`);
       } finally {
         db.close();
       }
@@ -145,15 +146,42 @@ export function registerAnalysisCommands(program: Command): void {
       try {
         ensureAnalysisSchema(db);
         const rows = db.prepare(
-          `SELECT name, version, kind, framework, source_file FROM analysis_dependencies ORDER BY framework DESC, name`,
-        ).all() as { name: string; version: string; kind: string; framework: number; source_file: string }[];
+          `SELECT name, version, resolved_version, kind, framework, source_file FROM analysis_dependencies ORDER BY framework DESC, name`,
+        ).all() as { name: string; version: string; resolved_version: string; kind: string; framework: number; source_file: string }[];
         if (rows.length === 0) {
           console.log('No dependencies extracted. Run `codegraph analysis refresh` first.');
           return;
         }
         for (const r of rows) {
           const fw = r.framework ? ' [framework]' : '';
-          console.log(`  ${r.name}${r.version ? ' ' + r.version : ''} (${r.kind}${fw}, ${r.source_file})`);
+          const locked = r.resolved_version ? ` (locked ${r.resolved_version})` : '';
+          console.log(`  ${r.name}${r.version ? ' ' + r.version : ''}${locked} (${r.kind}${fw}, ${r.source_file})`);
+        }
+      } finally {
+        db.close();
+      }
+    });
+
+  // -- toolchain ----------------------------------------------------------------
+  analysis
+    .command('toolchain [path]')
+    .description('Show language/toolchain versions (rust channel, edition, python requires, node engines)')
+    .action((pathArg?: string) => {
+      const root = resolveProjectRoot(pathArg);
+      const { db } = openDb(root);
+      try {
+        ensureAnalysisSchema(db);
+        const rows = db.prepare(
+          `SELECT language, version, edition, source_file FROM analysis_toolchains ORDER BY language`,
+        ).all() as { language: string; version: string; edition: string; source_file: string }[];
+        if (rows.length === 0) {
+          console.log('No toolchain info. Run `codegraph analysis refresh` first.');
+          return;
+        }
+        for (const r of rows) {
+          const v = r.version ? ` version=${r.version}` : '';
+          const e = r.edition ? ` ${r.language === 'python' ? 'requires-python' : 'edition'}=${r.edition}` : '';
+          console.log(`  ${r.language}${v}${e} (${r.source_file})`);
         }
       } finally {
         db.close();

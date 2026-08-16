@@ -104,17 +104,125 @@ async function findManifests(root: string, maxDepth: number): Promise<string[]> 
   return out;
 }
 
+/** Parse Cargo.lock [[package]] blocks into name -> exact version. */
+async function parseCargoLock(root: string): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  const abs = path.join(root, 'Cargo.lock');
+  let content: string;
+  try {
+    content = await fs.readFile(abs, 'utf-8');
+  } catch {
+    return map;
+  }
+  const blocks = content.split(/\[\[package\]\]/);
+  for (const block of blocks) {
+    const name = block.match(/^name\s*=\s*"([^"]+)"/m)?.[1];
+    const version = block.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+    if (name && version) map.set(name, version);
+  }
+  return map;
+}
+
+/** Collect language/toolchain versions from rust-toolchain, Cargo.toml, pyproject.toml, package.json. */
+export async function scanToolchains(root: string): Promise<
+  { language: string; version: string; edition: string; source_file: string }[]
+> {
+  const out: { language: string; version: string; edition: string; source_file: string }[] = [];
+  const manifests = await findManifests(root, 3);
+
+  // rust-toolchain.toml / rust-toolchain at any level
+  async function readFirst(file: string): Promise<string | null> {
+    for (const rel of manifests) {
+      const dir = path.dirname(rel);
+      const candidate = path.join(dir, file);
+      const abs = path.join(root, candidate);
+      try {
+        return await fs.readFile(abs, 'utf-8');
+      } catch { /* keep looking */ }
+    }
+    return null;
+  }
+
+  const tc = await readFirst('rust-toolchain.toml');
+  if (tc) {
+    const channel = tc.match(/channel\s*=\s*"([^"]+)"/)?.[1] ?? '';
+    out.push({ language: 'rust', version: channel, edition: '', source_file: 'rust-toolchain.toml' });
+  } else {
+    const tcPlain = await readFirst('rust-toolchain');
+    if (tcPlain) {
+      out.push({ language: 'rust', version: tcPlain.trim(), edition: '', source_file: 'rust-toolchain' });
+    }
+  }
+
+  for (const rel of manifests) {
+    if (rel.endsWith('Cargo.toml')) {
+      const abs = path.join(root, rel);
+      let content: string;
+      try { content = await fs.readFile(abs, 'utf-8'); } catch { continue; }
+      const edition = content.match(/edition\s*=\s*"([^"]+)"/)?.[1] ?? '';
+      const rustVersion = content.match(/rust-version\s*=\s*"([^"]+)"/)?.[1] ?? '';
+      if (edition || rustVersion) {
+        out.push({
+          language: 'rust',
+          version: rustVersion,
+          edition,
+          source_file: rel,
+        });
+      }
+    } else if (rel.endsWith('pyproject.toml')) {
+      const abs = path.join(root, rel);
+      let content: string;
+      try { content = await fs.readFile(abs, 'utf-8'); } catch { continue; }
+      const requires = content.match(/requires-python\s*=\s*"([^"]+)"/)?.[1] ?? '';
+      if (requires) {
+        out.push({ language: 'python', version: '', edition: requires, source_file: rel });
+      }
+    } else if (rel.endsWith('package.json')) {
+      const abs = path.join(root, rel);
+      let content: string;
+      try { content = await fs.readFile(abs, 'utf-8'); } catch { continue; }
+      try {
+        const pkg = JSON.parse(content);
+        const engines = pkg.engines?.node ?? '';
+        if (engines) {
+          out.push({ language: 'javascript', version: '', edition: engines, source_file: rel });
+        }
+      } catch { /* invalid json */ }
+    }
+  }
+  return out;
+}
+
+/** Refresh analysis_toolchains from toolchain manifests. */
+export async function refreshToolchains(db: SqliteDatabase, root: string): Promise<number> {
+  const upsert = db.prepare(`
+    INSERT INTO analysis_toolchains (language, version, edition, source_file, extracted_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(language) DO UPDATE SET
+      version=excluded.version, edition=excluded.edition,
+      source_file=excluded.source_file, extracted_at=excluded.extracted_at
+  `);
+  const now = Date.now();
+  const rows = await scanToolchains(root);
+  for (const r of rows) {
+    upsert.run(r.language, r.version, r.edition, r.source_file, now);
+  }
+  return rows.length;
+}
+
 /** Refresh analysis_dependencies from all supported manifests under root. */
 export async function refreshDependencies(db: SqliteDatabase, root: string): Promise<number> {
   const insert = db.prepare(`
-    INSERT INTO analysis_dependencies (name, version, kind, framework, source_file, extracted_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO analysis_dependencies (name, version, resolved_version, kind, framework, source_file, extracted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(name) DO UPDATE SET
-      version=excluded.version, kind=excluded.kind, framework=excluded.framework,
+      version=excluded.version, resolved_version=excluded.resolved_version,
+      kind=excluded.kind, framework=excluded.framework,
       source_file=excluded.source_file, extracted_at=excluded.extracted_at
   `);
 
   const now = Date.now();
+  const lockVersions = await parseCargoLock(root);
   let count = 0;
   const seenSources = new Set<string>();
   const manifests = await findManifests(root, 3);
@@ -126,7 +234,8 @@ export async function refreshDependencies(db: SqliteDatabase, root: string): Pro
     const deps = await scanManifest(root, rel, ecosystem);
     seenSources.add(rel);
     for (const d of deps) {
-      insert.run(d.name, d.version, d.kind, (d as { framework?: number }).framework ?? 0, rel, now);
+      const resolved = lockVersions.get(d.name) ?? '';
+      insert.run(d.name, d.version, resolved, d.kind, (d as { framework?: number }).framework ?? 0, rel, now);
       count++;
     }
   }

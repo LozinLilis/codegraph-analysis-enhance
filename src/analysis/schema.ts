@@ -25,10 +25,20 @@ CREATE TABLE IF NOT EXISTS analysis_project_meta (
 -- 依赖框架清单（Cargo.toml / pyproject.toml / package.json / pom.xml）
 CREATE TABLE IF NOT EXISTS analysis_dependencies (
   name TEXT PRIMARY KEY,
-  version TEXT,
+  version TEXT,                            -- declared version (manifest)
+  resolved_version TEXT NOT NULL DEFAULT '', -- locked version (Cargo.lock etc.)
   kind TEXT NOT NULL DEFAULT 'runtime',       -- runtime / dev / build
   framework INTEGER NOT NULL DEFAULT 0,       -- 1 = framework-level dep
   source_file TEXT NOT NULL,
+  extracted_at INTEGER NOT NULL
+);
+
+-- 语言 / 工具链版本（rustc / python / node + edition / toolchain 文件）
+CREATE TABLE IF NOT EXISTS analysis_toolchains (
+  language TEXT PRIMARY KEY,               -- rust / python / javascript
+  version TEXT NOT NULL DEFAULT '',        -- exact version (e.g. 1.85.1 / 3.12.13 / 24.11.0)
+  edition TEXT NOT NULL DEFAULT '',        -- rust edition, python requires-python, node engines
+  source_file TEXT NOT NULL DEFAULT '',
   extracted_at INTEGER NOT NULL
 );
 
@@ -120,5 +130,9 @@ export function ensureAnalysisSchema(db: SqliteDatabase): void {
   }
   if (!cols.some((c) => c.name === 'label_source')) {
     db.exec(`ALTER TABLE analysis_symbol_metrics ADD COLUMN label_source TEXT NOT NULL DEFAULT 'heuristic'`);
+  }
+  const depCols = db.prepare(`PRAGMA table_info(analysis_dependencies)`).all() as { name: string }[];
+  if (!depCols.some((c) => c.name === 'resolved_version')) {
+    db.exec(`ALTER TABLE analysis_dependencies ADD COLUMN resolved_version TEXT NOT NULL DEFAULT ''`);
   }
 }
