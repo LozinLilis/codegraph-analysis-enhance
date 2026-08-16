@@ -53,6 +53,7 @@ import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime
 import { installCommandSupervision } from './command-supervision';
 import { EXTRACTION_VERSION } from '../extraction/extraction-version';
 import { getTelemetry, TELEMETRY_DOCS, recordIndexEvent } from '../telemetry';
+import { registerAnalysisCommands } from '../analysis';
 
 // Decided once, before `--color`/`--no-color` are stripped from argv below
 // (#1281). Piped/redirected stdout, NO_COLOR, or --no-color -> plain output.
@@ -588,6 +589,8 @@ async function recordIndexTelemetry(
 // =============================================================================
 // Commands
 // =============================================================================
+
+registerAnalysisCommands(program);
 
 /**
  * codegraph init [path]
